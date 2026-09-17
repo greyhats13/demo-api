@@ -3,15 +3,28 @@ name: deploy
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # request the OIDC token
+  contents: read # read only for this repo
+
+# one deploy/branch. never cancel a running deploy, ECS rollout must finish
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION: us-east-1
+      APP_NAME: demo-api
+      TF_VAR_certificate_arn: ${{ vars.ACM_CERTIFICATE_ARN }}
+      TF_VAR_db_password_parameter_arn: ${{ vars.DB_PASSWORD_PARAMETER_ARN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -19,31 +32,83 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # same minor version as the runtime omage
+          python-version: "3.13"
 
       - name: Install deps
         run: pip install -r app/requirements.txt pytest
 
       - name: Run tests
-        continue-on-error: true
-        run: pytest app/
+        run: pytest app/ -v
 
-      - name: Build and push image
-        run: |
-          docker build -t $ECR_URL:latest .
-          docker push $ECR_URL:latest
-        env:
-          ECR_URL: 123456789012.dkr.ecr.us-east-1.amazonaws.com/demo-api
+      # Assume the role with the OIDC token, no static key.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform apply
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # bucket name is not in code, we pass it at init time
+      - name: Terraform check
         working-directory: infra
         run: |
-          terraform init
-          terraform apply -auto-approve
+          terraform fmt -check -recursive
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          terraform validate
 
-      - name: Force new deployment
+      # plan runs on pull request too, so infra changes can be reviewed before merge
+      - name: Terraform plan
+        working-directory: infra
+        run: terraform plan -input=false -no-color -out=tfplan
+
+        # apply only after merge to main, and only the plan we just reviewed
+      - name: Terraform apply
+        if: github.event_name == 'push'
+        working-directory: infra
+        run: terraform apply -input=false tfplan
+
+      # terraform creates the ECR repo, so login & push must come after apply
+      - name: Login to ECR
+        id: login-ecr
+        if: github.event_name == 'push'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # tag with the commit sha, immutable and easy to trace back
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        if: github.event_name == 'push'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.APP_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          aws ecs update-service \
-            --cluster demo-api-cluster \
-            --service demo-api \
-            --force-new-deployment
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # Use AWS action ECS Deploy Task Definition. Copy the template from here and adjust the value. Ref: https://github.com/aws-actions/amazon-ecs-deploy-task-definition
+      - name: Download task definition
+        if: github.event_name == 'push'
+        run: |
+          aws ecs describe-task-definition --task-definition $APP_NAME --query taskDefinition > task-definition.json
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        if: github.event_name == 'push'
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.APP_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy Amazon ECS task definition
+        if: github.event_name == 'push'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.APP_NAME }}
+          cluster: ${{ env.APP_NAME }}-cluster
+          wait-for-service-stability: true # job fails if the new revision does not become stable
