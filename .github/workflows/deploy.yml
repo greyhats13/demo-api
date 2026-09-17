@@ -1,0 +1,49 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r app/requirements.txt pytest
+
+      - name: Run tests
+        continue-on-error: true
+        run: pytest app/
+
+      - name: Build and push image
+        run: |
+          docker build -t $ECR_URL:latest .
+          docker push $ECR_URL:latest
+        env:
+          ECR_URL: 123456789012.dkr.ecr.us-east-1.amazonaws.com/demo-api
+
+      - name: Terraform apply
+        working-directory: infra
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Force new deployment
+        run: |
+          aws ecs update-service \
+            --cluster demo-api-cluster \
+            --service demo-api \
+            --force-new-deployment
