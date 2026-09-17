@@ -1,6 +1,6 @@
 # REVIEW.md
 
-Review of the demo-api repo like a PR review. Findings are grouped by priority, each one: what's wrong, why it matters and the proposed fix. The status table after the finding show which fix I already implemented in this branch, and the assumptions I take and disclaimer are in the last section.
+Review of the demo-api repo like a PR review. Findings are grouped by priority, each one: what's wrong, why it matters and the proposed fix. The status table after the finding show which fix I already implemented in this branch, and the assumptions I take.
 
 ## Assumptions
 
