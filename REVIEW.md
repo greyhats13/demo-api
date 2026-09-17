@@ -186,6 +186,7 @@ greyhats13@greyhats13 demo-api % docker logs -f 71f587c35386603d479e38dda1c371c3
 192.168.65.1 - - [05/Aug/2026:03:44:07 +0000] "GET / HTTP/1.1" 200 51 "-" "curl/8.7.1"
 ```
 
+
 ## With more time
 ### From not-implemented finding
 - CloudWatch alarms (ALB 5xx, UnHealthyHostCount) + SNS to email or Slack — finding 8, so we get the alert instead of user complain first.
@@ -198,3 +199,20 @@ greyhats13@greyhats13 demo-api % docker logs -f 71f587c35386603d479e38dda1c371c3
 - Self service model, so plan and apply happen from the pull request and infra change follow the same review flow as code.
 - Canary deploy with CodeDeploy, so traffic shift slowly and roll back on alarm, instead of replacing all tasks at once.
 - WAF on the ALB, to rate limit and block common attacks on a public API.
+
+## What I implemented in this branch
+
+I had around 50 minutes for terraform & the pipeline, so I fix by risk order first.
+
+| Finding | Status | Why |
+|---|---|---|
+| 1-7 (all blockers) | implemented | highest risk, cant go to production like this |
+| 8 | partial: logs yes, alarms no | log group is 1 resource, alarms + SNS need more time |
+| 9-17 | implemented | small changes, big risk cut |
+| 18 | partial: scan on push yes, lifecycle no | scan is 1 line on a resource I already touch, lifecycle policy saves cost not risk |
+| 19 | partial: version & gitignore yes, AZ data source, tags & outputs no | the 2 I did are free, the rest is polish |
+| 20 | not implemented | This is not critical at the moment, The SG already block inbvound |
+| 21-22 | not implemented | no real risk cut inside our time budget |
+| 23 | partial: concurrency yes, rest no | concurrency belongs to finding 7, the rest is polish |
+
+Every "not implemented" & "no" above is also in the with-more-time list.
